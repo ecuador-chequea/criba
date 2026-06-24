@@ -9,6 +9,7 @@ import csv
 import io
 from datetime import datetime
 import re
+import time
 
 # ── Configuración de página ──────────────────────────────────────────────────
 st.set_page_config(
@@ -85,86 +86,75 @@ def get_anthropic_client():
     return anthropic.Anthropic(api_key=st.secrets["ANTHROPIC_API_KEY"])
 
 @st.cache_resource
-def get_openai_client():
-    from openai import OpenAI
-    return OpenAI(api_key=st.secrets["OPENAI_API_KEY"])
-
-@st.cache_resource
 def get_google_api_key():
     return st.secrets["GOOGLE_API_KEY"]
 
-# ── Funciones YouTube ─────────────────────────────────────────────────────────
+def get_assemblyai_key():
+    return st.secrets["ASSEMBLYAI_API_KEY"]
 
-def extract_video_id(url: str):
-    patterns = [
-        r'(?:v=|\/)([0-9A-Za-z_-]{11}).*',
-        r'(?:youtu\.be\/)([0-9A-Za-z_-]{11})',
-        r'(?:embed\/)([0-9A-Za-z_-]{11})'
-    ]
-    for pattern in patterns:
-        match = re.search(pattern, url)
-        if match:
-            return match.group(1)
-    return None
+# ── Transcripción con AssemblyAI ──────────────────────────────────────────────
 
+def transcribe_with_assemblyai(audio_source: str, is_url: bool = True) -> str:
+    """
+    Transcribe audio usando AssemblyAI.
+    audio_source: URL de YouTube o URL de archivo subido a AssemblyAI
+    """
+    api_key = get_assemblyai_key()
+    headers = {"authorization": api_key, "content-type": "application/json"}
 
-def get_transcript_api(video_id: str):
-    """Extrae subtítulos con youtube-transcript-api."""
-    try:
-        from youtube_transcript_api import YouTubeTranscriptApi, NoTranscriptFound, TranscriptsDisabled
-        
-        # Intentar español primero, luego cualquier idioma
-        try:
-            transcript = YouTubeTranscriptApi.get_transcript(video_id, languages=['es', 'es-419', 'es-EC'])
-        except NoTranscriptFound:
-            # Buscar cualquier transcript disponible
-            transcript_list = YouTubeTranscriptApi.list_transcripts(video_id)
-            transcript = transcript_list.find_transcript(
-                transcript_list._manually_created_transcripts or 
-                list(transcript_list._generated_transcripts.keys())
-            ).fetch()
-        
-        text = ' '.join([t['text'] for t in transcript])
-        text = text.replace('\n', ' ').strip()
-        return text if len(text) > 50 else None
-        
-    except Exception:
-        return None
+    # Si es archivo local, primero subirlo
+    if not is_url:
+        with open(audio_source, "rb") as f:
+            upload_response = requests.post(
+                "https://api.assemblyai.com/v2/upload",
+                headers={"authorization": api_key},
+                data=f,
+                timeout=120
+            )
+        if upload_response.status_code != 200:
+            raise ValueError("Error subiendo el archivo a AssemblyAI.")
+        audio_url = upload_response.json()["upload_url"]
+    else:
+        audio_url = audio_source
+
+    # Crear transcripción
+    response = requests.post(
+        "https://api.assemblyai.com/v2/transcript",
+        headers=headers,
+        json={"audio_url": audio_url, "language_code": "es"}
+    )
+    if response.status_code != 200:
+        raise ValueError(f"Error iniciando transcripción: {response.text}")
+
+    transcript_id = response.json()["id"]
+
+    # Esperar resultado con polling
+    polling_url = f"https://api.assemblyai.com/v2/transcript/{transcript_id}"
+    for _ in range(120):  # hasta 4 minutos
+        poll = requests.get(polling_url, headers=headers)
+        status = poll.json().get("status")
+        if status == "completed":
+            return poll.json().get("text", "")
+        elif status == "error":
+            raise ValueError(f"Error en transcripción: {poll.json().get('error')}")
+        time.sleep(2)
+
+    raise ValueError("La transcripción tardó demasiado. Intenta con un video más corto.")
 
 
 def process_youtube_url(url: str) -> str:
-    video_id = extract_video_id(url)
-    if not video_id:
-        raise ValueError("URL de YouTube no válida.")
-
-    st.info("🔍 Buscando subtítulos del video…")
-    transcript = get_transcript_api(video_id)
-    if transcript:
-        st.success("✅ Subtítulos obtenidos correctamente.")
-        return transcript
-
-    raise ValueError(
-        "No se encontraron subtítulos en este video. "
-        "Para videos sin subtítulos, descarga el audio y súbelo directamente como archivo MP3."
-    )
+    st.info("🎙️ Enviando video a AssemblyAI para transcribir… (puede tomar 1-2 minutos)")
+    return transcribe_with_assemblyai(url, is_url=True)
 
 
-# ── Transcripción de archivo ──────────────────────────────────────────────────
-
-def transcribe_audio(audio_bytes: bytes, filename: str) -> str:
-    client = get_openai_client()
+def transcribe_audio_file(audio_bytes: bytes, filename: str) -> str:
     suffix = Path(filename).suffix or '.mp3'
     with tempfile.NamedTemporaryFile(delete=False, suffix=suffix) as tmp:
         tmp.write(audio_bytes)
         tmp_path = tmp.name
     try:
-        with open(tmp_path, "rb") as f:
-            response = client.audio.transcriptions.create(
-                model="whisper-1",
-                file=f,
-                language="es"
-            )
-        return response.text
+        st.info("🎙️ Subiendo archivo y transcribiendo… (puede tomar 1-2 minutos)")
+        return transcribe_with_assemblyai(tmp_path, is_url=False)
     finally:
         os.unlink(tmp_path)
 
@@ -225,12 +215,10 @@ def search_factchecks(query: str) -> list:
     try:
         response = requests.get(url, params=params, timeout=10)
         if response.status_code == 200:
-            data = response.json()
             results = []
-            for claim in data.get("claims", []):
+            for claim in response.json().get("claims", []):
                 for review in claim.get("claimReview", []):
-                    publisher = review.get("publisher", {})
-                    name = publisher.get("name", "")
+                    name = review.get("publisher", {}).get("name", "")
                     if "Lupa" in name:
                         continue
                     results.append({
@@ -310,11 +298,10 @@ if st.session_state.step == 1:
         if not uploaded and not url_input.strip():
             st.warning("Sube un archivo o pega una URL para continuar.")
         else:
-            with st.spinner("Procesando…"):
+            with st.spinner("Transcribiendo…"):
                 try:
                     if uploaded:
-                        st.info("🎙️ Transcribiendo con Whisper…")
-                        transcription = transcribe_audio(uploaded.read(), uploaded.name)
+                        transcription = transcribe_audio_file(uploaded.read(), uploaded.name)
                     else:
                         transcription = process_youtube_url(url_input.strip())
                     st.session_state.transcription = transcription
