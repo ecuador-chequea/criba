@@ -259,14 +259,24 @@ def search_factcheck_tools(query: str) -> list:
     return results
 
 
+def build_search_query(claim_text: str) -> str:
+    """Extrae palabras clave del claim para búsqueda más efectiva."""
+    # Eliminar palabras vacías comunes
+    stopwords = {"que", "en", "el", "la", "los", "las", "de", "del", "un", "una", "con", "por", "para", "una", "era", "fue", "es", "se", "su", "sus", "al", "le", "lo", "y", "o", "a", "e"}
+    words = claim_text.lower().split()
+    keywords = [w.strip('",.:;()') for w in words if w.strip('",.:;()') not in stopwords and len(w) > 3]
+    return " ".join(keywords[:6])
+
+
 def search_ecuador_chequea(query: str) -> list:
     """Busca en ecuadorchequea.com usando Google Custom Search API."""
     api_key = get_google_api_key()
     url = "https://www.googleapis.com/customsearch/v1"
+    short_query = build_search_query(query)
     params = {
         "key": api_key,
         "cx": CUSTOM_SEARCH_CX,
-        "q": query,
+        "q": short_query,
         "num": 3
     }
     results = []
@@ -308,19 +318,33 @@ def search_all_verificaciones(query: str) -> list:
 
 
 def get_context(claim_text: str) -> str:
+    """Busca contexto en la web usando la herramienta de búsqueda de Claude."""
     client = get_anthropic_client()
-    prompt = f"""Proporciona contexto factual breve (máximo 2 oraciones) sobre este claim, citando la fuente oficial. Si no tienes información confiable, di "No se encontró contexto verificable en fuentes oficiales."
 
-Claim: {claim_text}
+    prompt = f"""Busca información sobre este claim y responde en UNA sola oración con qué dice la fuente más relevante que encuentres. Incluye el enlace entre paréntesis al final.
 
-Formato: explicación directa con fuente entre paréntesis. Ejemplo: "Según el INEC, la tasa fue X% en Y (INEC, 2024)."
-"""
+Si no encuentras nada confiable, responde exactamente: "Sin contexto verificable en fuentes oficiales."
+
+Reglas estrictas:
+- Solo UNA oración
+- Sin negritas
+- Sin elaboraciones ni notas
+- El enlace va entre paréntesis al final
+
+Ejemplo: "Según la Fiscalía, Glas tenía arresto domiciliario desde octubre de 2023 (fiscalia.gob.ec/...)."
+
+Claim: {claim_text}"""
+
     response = client.messages.create(
         model="claude-sonnet-4-6",
-        max_tokens=300,
+        max_tokens=400,
+        tools=[{"type": "web_search_20250305", "name": "web_search"}],
         messages=[{"role": "user", "content": prompt}]
     )
-    return response.content[0].text.strip()
+
+    # Extraer solo los bloques de texto de la respuesta
+    text_parts = [block.text for block in response.content if hasattr(block, "text")]
+    return " ".join(text_parts).strip() if text_parts else "Sin contexto verificable en fuentes oficiales."
 
 
 # ── Exportación ───────────────────────────────────────────────────────────────
@@ -403,7 +427,7 @@ if st.session_state.step == 1:
                         st.error(f"Error: {str(e)}")
                         st.stop()
 
-                with st.spinner("🔍 Identificando y clasificando claims verificables…"):
+                with st.spinner("👀 Identificando y clasificando claims verificables…"):
                     try:
                         claims_raw = extract_claims(transcription, lang_code)
                         enriched = []
@@ -446,7 +470,7 @@ if st.session_state.step == 1:
             else:
                 st.session_state.transcription = texto_input.strip()
                 st.session_state.words = []
-                with st.spinner("🔍 Identificando y clasificando claims verificables…"):
+                with st.spinner("👀 Identificando y clasificando claims verificables…"):
                     try:
                         claims_raw = extract_claims(texto_input.strip(), lang_code)
                         enriched = []
