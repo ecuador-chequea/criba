@@ -8,13 +8,12 @@ from pathlib import Path
 import csv
 import io
 from datetime import datetime
-import re
 import time
 
 # ── Configuración de página ──────────────────────────────────────────────────
 st.set_page_config(
     page_title="Criba · Ecuador Chequea",
-    page_icon="🔎",
+    page_icon="🧐",
     layout="centered"
 )
 
@@ -53,11 +52,28 @@ st.markdown("""
         margin-top: 1.5rem; font-size: 13px; color: #26215C;
         border-left: 3px solid #7F77DD;
     }
+    .tip-box {
+        background: #F1EFE8; border-radius: 8px; padding: 12px 16px;
+        margin-bottom: 1rem; font-size: 13px; color: #444441;
+        border-left: 3px solid #999;
+    }
     .source-chip {
         display: inline-flex; align-items: center; gap: 6px;
         background: #f5f5f5; border-radius: 6px;
         padding: 5px 10px; font-size: 12px; color: #333;
         text-decoration: none; margin-top: 6px; margin-right: 6px;
+    }
+    .source-chip-ec {
+        display: inline-flex; align-items: center; gap: 6px;
+        background: #EEEDFE; border-radius: 6px;
+        padding: 5px 10px; font-size: 12px; color: #3C3489;
+        text-decoration: none; margin-top: 6px; margin-right: 6px;
+        font-weight: 500;
+    }
+    .minute-badge {
+        display: inline-block; font-size: 11px; font-weight: 600;
+        padding: 2px 8px; border-radius: 20px;
+        background: #F1EFE8; color: #633806; margin-left: 8px;
     }
     .footer-bar {
         text-align: center; font-size: 12px; color: #999;
@@ -92,71 +108,80 @@ def get_google_api_key():
 def get_assemblyai_key():
     return st.secrets["ASSEMBLYAI_API_KEY"]
 
+CUSTOM_SEARCH_CX = "b31919749081e4a43"
+
 # ── Transcripción con AssemblyAI ──────────────────────────────────────────────
 
-def transcribe_with_assemblyai(audio_source: str, is_url: bool = True) -> str:
-    """
-    Transcribe audio usando AssemblyAI.
-    audio_source: URL de YouTube o URL de archivo subido a AssemblyAI
-    """
+def transcribe_audio_file(audio_bytes: bytes, filename: str) -> tuple:
+    """Devuelve (texto, lista de words con timestamps)"""
     api_key = get_assemblyai_key()
-    headers = {"authorization": api_key, "content-type": "application/json"}
+    headers_auth = {"authorization": api_key}
 
-    # Si es archivo local, primero subirlo
-    if not is_url:
-        with open(audio_source, "rb") as f:
-            upload_response = requests.post(
-                "https://api.assemblyai.com/v2/upload",
-                headers={"authorization": api_key},
-                data=f,
-                timeout=120
-            )
-        if upload_response.status_code != 200:
-            raise ValueError("Error subiendo el archivo a AssemblyAI.")
-        audio_url = upload_response.json()["upload_url"]
-    else:
-        audio_url = audio_source
-
-    # Crear transcripción
-    response = requests.post(
-        "https://api.assemblyai.com/v2/transcript",
-        headers=headers,
-        json={"audio_url": audio_url, "language_code": "es"}
+    upload_response = requests.post(
+        "https://api.assemblyai.com/v2/upload",
+        headers=headers_auth,
+        data=audio_bytes,
+        timeout=120
     )
-    if response.status_code != 200:
-        raise ValueError(f"Error iniciando transcripción: {response.text}")
+    if upload_response.status_code != 200:
+        raise ValueError("Error subiendo el archivo. Intenta de nuevo.")
 
-    transcript_id = response.json()["id"]
+    audio_url = upload_response.json()["upload_url"]
 
-    # Esperar resultado con polling
+    transcript_response = requests.post(
+        "https://api.assemblyai.com/v2/transcript",
+        headers={**headers_auth, "content-type": "application/json"},
+        json={
+            "audio_url": audio_url,
+            "language_code": "es",
+            "word_boost": [],
+            "format_text": True
+        }
+    )
+    if transcript_response.status_code != 200:
+        raise ValueError("Error iniciando la transcripción.")
+
+    transcript_id = transcript_response.json()["id"]
     polling_url = f"https://api.assemblyai.com/v2/transcript/{transcript_id}"
-    for _ in range(120):  # hasta 4 minutos
-        poll = requests.get(polling_url, headers=headers)
-        status = poll.json().get("status")
+
+    for _ in range(120):
+        poll = requests.get(polling_url, headers=headers_auth)
+        data = poll.json()
+        status = data.get("status")
         if status == "completed":
-            return poll.json().get("text", "")
+            text = data.get("text", "")
+            if not text:
+                raise ValueError("La transcripción no produjo texto. Verifica que el audio tenga voz.")
+            words = data.get("words", [])
+            return text, words
         elif status == "error":
-            raise ValueError(f"Error en transcripción: {poll.json().get('error')}")
+            raise ValueError(f"Error en transcripción: {data.get('error')}")
         time.sleep(2)
 
-    raise ValueError("La transcripción tardó demasiado. Intenta con un video más corto.")
+    raise ValueError("La transcripción tardó demasiado. Intenta con un archivo más corto.")
 
 
-def process_youtube_url(url: str) -> str:
-    st.info("🎙️ Enviando video a AssemblyAI para transcribir… (puede tomar 1-2 minutos)")
-    return transcribe_with_assemblyai(url, is_url=True)
+def find_timestamp_for_claim(claim_text: str, words: list) -> str | None:
+    """Busca el minuto aproximado de un claim en la lista de words de AssemblyAI."""
+    if not words:
+        return None
 
+    claim_words = claim_text.lower().split()
+    if not claim_words:
+        return None
 
-def transcribe_audio_file(audio_bytes: bytes, filename: str) -> str:
-    suffix = Path(filename).suffix or '.mp3'
-    with tempfile.NamedTemporaryFile(delete=False, suffix=suffix) as tmp:
-        tmp.write(audio_bytes)
-        tmp_path = tmp.name
-    try:
-        st.info("🎙️ Subiendo archivo y transcribiendo… (puede tomar 1-2 minutos)")
-        return transcribe_with_assemblyai(tmp_path, is_url=False)
-    finally:
-        os.unlink(tmp_path)
+    # Buscar la primera palabra del claim en la lista de words
+    first_word = claim_words[0].strip('",.')
+    for i, w in enumerate(words):
+        word_text = w.get("text", "").lower().strip('",.')
+        if word_text == first_word:
+            start_ms = w.get("start", 0)
+            total_seconds = start_ms // 1000
+            minutes = total_seconds // 60
+            seconds = total_seconds % 60
+            return f"{minutes}:{seconds:02d}"
+
+    return None
 
 
 # ── Extracción de claims ──────────────────────────────────────────────────────
@@ -208,29 +233,78 @@ TRANSCRIPCIÓN:
     return data.get("claims", [])
 
 
-def search_factchecks(query: str) -> list:
+# ── Búsqueda de verificaciones ────────────────────────────────────────────────
+
+def search_factcheck_tools(query: str) -> list:
+    """Busca en Google Fact Check Tools API (ClaimReview global)."""
     api_key = get_google_api_key()
     url = "https://factchecktools.googleapis.com/v1alpha1/claims:search"
-    params = {"query": query, "key": api_key, "languageCode": "es", "pageSize": 3}
+    params = {"query": query, "key": api_key, "languageCode": "es", "pageSize": 5}
+    results = []
     try:
         response = requests.get(url, params=params, timeout=10)
         if response.status_code == 200:
-            results = []
             for claim in response.json().get("claims", []):
                 for review in claim.get("claimReview", []):
                     name = review.get("publisher", {}).get("name", "")
-                    if "Lupa" in name:
-                        continue
                     results.append({
                         "org": name,
                         "titulo": review.get("title", claim.get("text", "")),
                         "url": review.get("url", ""),
-                        "fecha": review.get("reviewDate", "")[:10] if review.get("reviewDate") else ""
+                        "fecha": review.get("reviewDate", "")[:10] if review.get("reviewDate") else "",
+                        "fuente": "factcheck"
                     })
-            return results[:2]
     except Exception:
         pass
-    return []
+    return results
+
+
+def search_ecuador_chequea(query: str) -> list:
+    """Busca en ecuadorchequea.com usando Google Custom Search API."""
+    api_key = get_google_api_key()
+    url = "https://www.googleapis.com/customsearch/v1"
+    params = {
+        "key": api_key,
+        "cx": CUSTOM_SEARCH_CX,
+        "q": query,
+        "num": 3
+    }
+    results = []
+    try:
+        response = requests.get(url, params=params, timeout=10)
+        if response.status_code == 200:
+            for item in response.json().get("items", []):
+                results.append({
+                    "org": "Ecuador Chequea",
+                    "titulo": item.get("title", ""),
+                    "url": item.get("link", ""),
+                    "fecha": "",
+                    "fuente": "ecuadorchequea"
+                })
+    except Exception:
+        pass
+    return results
+
+
+def search_all_verificaciones(query: str) -> list:
+    """Combina ambas fuentes, deduplicando por URL. Ecuador Chequea primero."""
+    ec_results = search_ecuador_chequea(query)
+    fc_results = search_factcheck_tools(query)
+
+    # Separar Ecuador Chequea de otros en fc_results
+    ec_from_fc = [r for r in fc_results if "ecuador" in r.get("org", "").lower() or "chequea" in r.get("org", "").lower()]
+    otros = [r for r in fc_results if r not in ec_from_fc]
+
+    # Combinar: EC primero (sin duplicar URLs)
+    seen_urls = set()
+    combined = []
+    for r in ec_results + ec_from_fc + otros:
+        url = r.get("url", "")
+        if url and url not in seen_urls:
+            seen_urls.add(url)
+            combined.append(r)
+
+    return combined[:4]
 
 
 def get_context(claim_text: str) -> str:
@@ -249,20 +323,29 @@ Formato: explicación directa con fuente entre paréntesis. Ejemplo: "Según el 
     return response.content[0].text.strip()
 
 
+# ── Exportación ───────────────────────────────────────────────────────────────
+
 def export_csv(claims: list) -> str:
     output = io.StringIO()
-    writer = csv.DictWriter(output, fieldnames=["tipo", "texto", "contexto", "fuentes"])
+    writer = csv.DictWriter(output, fieldnames=["tipo", "minuto", "texto", "contexto", "fuentes"])
     writer.writeheader()
     for c in claims:
         fuentes = "; ".join([r.get("url", "") for r in c.get("verificaciones", [])])
-        writer.writerow({"tipo": c.get("tipo", ""), "texto": c.get("texto", ""), "contexto": c.get("contexto", ""), "fuentes": fuentes})
+        writer.writerow({
+            "tipo": c.get("tipo", ""),
+            "minuto": c.get("minuto", ""),
+            "texto": c.get("texto", ""),
+            "contexto": c.get("contexto", ""),
+            "fuentes": fuentes
+        })
     return output.getvalue()
 
 
 def export_txt(claims: list) -> str:
     lines = [f"CRIBA · Ecuador Chequea\nExportado: {datetime.now().strftime('%d/%m/%Y %H:%M')}\n{'─'*50}\n"]
     for i, c in enumerate(claims, 1):
-        lines.append(f"{i}. [{c.get('tipo','').upper()}] {c.get('texto','')}")
+        minuto = f" [min. {c['minuto']}]" if c.get("minuto") else ""
+        lines.append(f"{i}. [{c.get('tipo','').upper()}]{minuto} {c.get('texto','')}")
         if c.get("contexto"):
             lines.append(f"   Contexto: {c['contexto']}")
         for v in c.get("verificaciones", []):
@@ -279,6 +362,8 @@ if "claims" not in st.session_state:
     st.session_state.claims = []
 if "step" not in st.session_state:
     st.session_state.step = 1
+if "words" not in st.session_state:
+    st.session_state.words = []
 
 # ── Paso 1: Input ─────────────────────────────────────────────────────────────
 if st.session_state.step == 1:
@@ -288,40 +373,97 @@ if st.session_state.step == 1:
         lang = st.selectbox("Idioma del audio", ["Español", "English", "Português"])
     lang_code = {"Español": "es", "English": "en", "Português": "pt"}[lang]
 
-    st.markdown("#### Sube tu archivo de audio o video")
-    uploaded = st.file_uploader("Formatos soportados", type=["mp3", "mp4", "wav", "m4a", "mov", "ogg"], label_visibility="collapsed")
+    tab1, tab2 = st.tabs(["🎙️ Subir audio o video", "📋 Pegar transcripción"])
 
-    st.markdown("**O pega una URL de YouTube**")
-    url_input = st.text_input("URL", placeholder="https://youtube.com/watch?v=...", label_visibility="collapsed")
+    with tab1:
+        st.markdown("""
+        <div class="tip-box">
+        💡 <strong>¿Tienes un video de YouTube?</strong> Descarga el audio gratis en 
+        <a href="https://cobalt.tools" target="_blank">cobalt.tools</a> — pega el enlace, 
+        selecciona "audio" y descarga el MP3. O copia la transcripción de YouTube y pégala en la pestaña de al lado.
+        </div>
+        """, unsafe_allow_html=True)
 
-    if st.button("⚗️ Transcribir y extraer claims", type="primary", use_container_width=True):
-        if not uploaded and not url_input.strip():
-            st.warning("Sube un archivo o pega una URL para continuar.")
-        else:
-            with st.spinner("Transcribiendo…"):
-                try:
-                    if uploaded:
-                        transcription = transcribe_audio_file(uploaded.read(), uploaded.name)
-                    else:
-                        transcription = process_youtube_url(url_input.strip())
-                    st.session_state.transcription = transcription
-                except Exception as e:
-                    st.error(f"Error: {str(e)}")
-                    st.stop()
+        uploaded = st.file_uploader(
+            "MP3, MP4, WAV, M4A, MOV, OGG · Máximo 200MB",
+            type=["mp3", "mp4", "wav", "m4a", "mov", "ogg"],
+            label_visibility="collapsed"
+        )
 
-            with st.spinner("Identificando y clasificando claims verificables…"):
-                try:
-                    claims_raw = extract_claims(transcription, lang_code)
-                    enriched = []
-                    for claim in claims_raw:
-                        verificaciones = search_factchecks(claim["texto"])
-                        contexto = get_context(claim["texto"])
-                        enriched.append({**claim, "verificaciones": verificaciones, "contexto": contexto})
-                    st.session_state.claims = enriched
-                    st.session_state.step = 2
-                    st.rerun()
-                except Exception as e:
-                    st.error(f"Error al extraer claims: {str(e)}")
+        if st.button("⚗️ Transcribir y extraer claims", type="primary", use_container_width=True, key="btn_audio"):
+            if not uploaded:
+                st.warning("Sube un archivo de audio o video para continuar.")
+            else:
+                with st.spinner("🎙️ Transcribiendo audio… esto puede tomar 1-2 minutos."):
+                    try:
+                        transcription, words = transcribe_audio_file(uploaded.read(), uploaded.name)
+                        st.session_state.transcription = transcription
+                        st.session_state.words = words
+                    except Exception as e:
+                        st.error(f"Error: {str(e)}")
+                        st.stop()
+
+                with st.spinner("🔍 Identificando y clasificando claims verificables…"):
+                    try:
+                        claims_raw = extract_claims(transcription, lang_code)
+                        enriched = []
+                        for claim in claims_raw:
+                            minuto = find_timestamp_for_claim(claim["texto"], st.session_state.words)
+                            verificaciones = search_all_verificaciones(claim["texto"])
+                            contexto = get_context(claim["texto"])
+                            enriched.append({
+                                **claim,
+                                "minuto": minuto,
+                                "verificaciones": verificaciones,
+                                "contexto": contexto
+                            })
+                        st.session_state.claims = enriched
+                        st.session_state.step = 2
+                        st.rerun()
+                    except Exception as e:
+                        st.error(f"Error al extraer claims: {str(e)}")
+
+    with tab2:
+        st.markdown("""
+        <div class="tip-box">
+        💡 <strong>En YouTube:</strong> abre el video → clic en los tres puntos (···) → 
+        <em>Mostrar transcripción</em> → selecciona todo el texto → copia y pega aquí.
+        </div>
+        """, unsafe_allow_html=True)
+
+        texto_input = st.text_area(
+            "Transcripción",
+            height=250,
+            placeholder="Pega aquí el texto transcrito…",
+            label_visibility="collapsed"
+        )
+
+        if st.button("⚗️ Extraer claims", type="primary", use_container_width=True, key="btn_texto"):
+            if not texto_input.strip():
+                st.warning("Pega una transcripción para continuar.")
+            elif len(texto_input.strip()) < 50:
+                st.warning("El texto es muy corto. Pega la transcripción completa.")
+            else:
+                st.session_state.transcription = texto_input.strip()
+                st.session_state.words = []
+                with st.spinner("🔍 Identificando y clasificando claims verificables…"):
+                    try:
+                        claims_raw = extract_claims(texto_input.strip(), lang_code)
+                        enriched = []
+                        for claim in claims_raw:
+                            verificaciones = search_all_verificaciones(claim["texto"])
+                            contexto = get_context(claim["texto"])
+                            enriched.append({
+                                **claim,
+                                "minuto": None,
+                                "verificaciones": verificaciones,
+                                "contexto": contexto
+                            })
+                        st.session_state.claims = enriched
+                        st.session_state.step = 2
+                        st.rerun()
+                    except Exception as e:
+                        st.error(f"Error al extraer claims: {str(e)}")
 
 # ── Paso 2: Resultados ────────────────────────────────────────────────────────
 elif st.session_state.step == 2:
@@ -335,6 +477,7 @@ elif st.session_state.step == 2:
             st.session_state.step = 1
             st.session_state.claims = []
             st.session_state.transcription = ""
+            st.session_state.words = []
             st.rerun()
 
     tag_labels = {"cifra": "Cifra", "declaracion": "Declaración", "hecho": "Hecho"}
@@ -342,8 +485,14 @@ elif st.session_state.step == 2:
     for i, claim in enumerate(claims):
         tipo = claim.get("tipo", "hecho")
         tag_label = tag_labels.get(tipo, tipo.capitalize())
+        minuto = claim.get("minuto")
+        minuto_str = f' <span class="minute-badge">⏱ {minuto}</span>' if minuto else ""
 
         with st.expander(f'[{tag_label.upper()}] {claim["texto"]}'):
+
+            if minuto:
+                st.markdown(f"**Minuto:** {minuto}")
+
             if claim.get("contexto"):
                 st.markdown("**Contexto de fondo**")
                 st.markdown(claim["contexto"])
@@ -357,9 +506,11 @@ elif st.session_state.step == 2:
                     url = v.get("url", "#")
                     fecha = v.get("fecha", "")
                     fecha_str = f" · {fecha}" if fecha else ""
-                    st.markdown(f'<a href="{url}" target="_blank" class="source-chip">🔗 {org}{fecha_str} — {titulo[:60]}...</a>', unsafe_allow_html=True)
+                    chip_class = "source-chip-ec" if v.get("fuente") == "ecuadorchequea" or "ecuador" in org.lower() else "source-chip"
+                    icon = "✅" if chip_class == "source-chip-ec" else "🔗"
+                    st.markdown(f'<a href="{url}" target="_blank" class="{chip_class}">{icon} {org}{fecha_str} — {titulo[:60]}...</a>', unsafe_allow_html=True)
             else:
-                st.markdown("*No se encontraron verificaciones previas en bases de datos de fact-checkers.*")
+                st.markdown("*No se encontraron verificaciones previas.*")
 
     st.markdown("""
     <div class="warning-box">
