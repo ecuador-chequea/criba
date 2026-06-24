@@ -96,13 +96,13 @@ st.markdown("""
 </div>
 """, unsafe_allow_html=True)
 
-st.markdown("**Criba** es una herramienta de asistencia para periodistas y fact-checkers. Analiza audios, videos o transcripciones y extrae automáticamente los claims con potencial verificable: cifras, declaraciones atribuidas y afirmaciones sobre hechos concretos.")
+st.markdown("**Criba** es una herramienta de asistencia para periodistas y fact-checkers. Analiza audios o transcripciones y extrae automáticamente los claims con potencial verificable: cifras, declaraciones atribuidas y afirmaciones sobre hechos concretos.")
 
 with st.expander("📖 Cómo usar Criba"):
     st.markdown("""
-**Opción 1 — Subir audio o video**
+**Opción 1 — Subir audio**
 1. Selecciona el idioma del contenido
-2. Sube tu archivo (MP3, MP4, WAV, M4A, MOV u OGG, hasta 200MB)
+2. Sube tu archivo (MP3, WAV, M4A u OGG, hasta 200MB)
 3. Haz clic en **Transcribir y extraer claims**
 4. Espera 1-3 minutos mientras se transcribe y analiza
 
@@ -126,7 +126,7 @@ with st.expander("🔬 Metodología"):
 Criba combina tres tecnologías para identificar y enriquecer claims verificables:
 
 **1. Transcripción automática (AssemblyAI)**
-Si subes un archivo de audio o video, Criba lo envía a AssemblyAI, que usa modelos de reconocimiento de voz para transcribir el contenido con timestamps por palabra.
+Si subes un archivo de audio, Criba lo envía a AssemblyAI, que usa modelos de reconocimiento de voz para transcribir el contenido con timestamps por palabra.
 
 **2. Extracción y clasificación de claims (Claude · Anthropic)**
 El texto se analiza con un modelo de lenguaje que distingue entre afirmaciones verificables y opiniones, promesas o valoraciones subjetivas. Cada claim se clasifica en tres categorías:
@@ -448,7 +448,7 @@ if st.session_state.step == 1:
         lang = st.selectbox("Idioma del audio", ["Español", "English", "Português"])
     lang_code = {"Español": "es", "English": "en", "Português": "pt"}[lang]
 
-    tab1, tab2 = st.tabs(["🎙️ Subir audio o video", "📋 Pegar transcripción"])
+    tab1, tab2 = st.tabs(["🎙️ Subir audio", "📋 Pegar transcripción"])
 
     with tab1:
         st.markdown("""
@@ -467,7 +467,7 @@ if st.session_state.step == 1:
 
         if st.button("⚗️ Transcribir y extraer claims", type="primary", use_container_width=True, key="btn_audio"):
             if not uploaded:
-                st.warning("Sube un archivo de audio o video para continuar.")
+                st.warning("Sube un archivo de audio para continuar.")
             else:
                 with st.spinner("🎙️ Transcribiendo audio… esto puede tomar 1-2 minutos."):
                     try:
