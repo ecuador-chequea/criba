@@ -448,6 +448,19 @@ def find_timestamp_for_claim(claim_text: str, words: list):
 
 # ── Extracción y traducción ───────────────────────────────────────────────────
 def extract_claims(transcription: str, audio_lang: str, translate_to_es: bool) -> list:
+    # Limitar a ~6000 palabras para no exceder el límite de tokens por minuto
+    words = transcription.split()
+    if len(words) > 6000:
+        # Procesar en dos mitades y combinar
+        mid = len(words) // 2
+        claims_a = _extract_claims_chunk(" ".join(words[:mid]), audio_lang, translate_to_es)
+        time.sleep(15)  # pausa entre chunks para respetar rate limit
+        claims_b = _extract_claims_chunk(" ".join(words[mid:]), audio_lang, translate_to_es)
+        return claims_a + claims_b
+    return _extract_claims_chunk(transcription, audio_lang, translate_to_es)
+
+
+def _extract_claims_chunk(transcription: str, audio_lang: str, translate_to_es: bool) -> list:
     client = get_anthropic_client()
     lang_map = {"es": "español", "en": "inglés", "pt": "portugués"}
     lang_name = lang_map.get(audio_lang, "español")
