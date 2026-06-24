@@ -90,11 +90,62 @@ st.markdown("""
     <div>
         <p class="criba-title">Criba</p>
         <p class="criba-sub">Extrae lo que vale verificar</p>
-        <span class="badge badge-purple">Ecuador Chequea</span>
-        <span class="badge badge-gray">ChequeaLab</span>
+        <a href="https://ecuadorchequea.com" target="_blank" class="badge badge-purple" style="text-decoration:none;">Ecuador Chequea</a>
+        <a href="https://chequealab.com" target="_blank" class="badge badge-gray" style="text-decoration:none;">ChequeaLab</a>
     </div>
 </div>
 """, unsafe_allow_html=True)
+
+st.markdown("**Criba** es una herramienta de asistencia para periodistas y fact-checkers. Analiza audios, videos o transcripciones y extrae automáticamente los claims con potencial verificable: cifras, declaraciones atribuidas y afirmaciones sobre hechos concretos.")
+
+with st.expander("📖 Cómo usar Criba"):
+    st.markdown("""
+**Opción 1 — Subir audio o video**
+1. Selecciona el idioma del contenido
+2. Sube tu archivo (MP3, MP4, WAV, M4A, MOV u OGG, hasta 200MB)
+3. Haz clic en **Transcribir y extraer claims**
+4. Espera 1-3 minutos mientras se transcribe y analiza
+
+**Opción 2 — Pegar transcripción**
+1. Copia el texto transcrito (en YouTube: tres puntos → *Mostrar transcripción*)
+2. Pégalo en el campo de texto
+3. Haz clic en **Extraer claims**
+
+**Resultados**
+- Cada claim aparece clasificado como **Cifra**, **Declaración** o **Hecho**
+- Si viene de audio, verás el **minuto aproximado** en que aparece
+- Se incluye **contexto de fondo** con fuentes y enlaces
+- Se muestran **verificaciones previas** de Ecuador Chequea y otros fact-checkers
+- Puedes exportar todo en TXT o CSV
+""")
+
+with st.expander("🔬 Metodología"):
+    st.markdown("""
+**¿Cómo funciona Criba?**
+
+Criba combina tres tecnologías para identificar y enriquecer claims verificables:
+
+**1. Transcripción automática (AssemblyAI)**
+Si subes un archivo de audio o video, Criba lo envía a AssemblyAI, que usa modelos de reconocimiento de voz para transcribir el contenido con timestamps por palabra.
+
+**2. Extracción y clasificación de claims (Claude · Anthropic)**
+El texto se analiza con un modelo de lenguaje que distingue entre afirmaciones verificables y opiniones, promesas o valoraciones subjetivas. Cada claim se clasifica en tres categorías:
+- **Cifra** — dato numérico, porcentaje, estadística o ranking
+- **Declaración** — afirmación atribuida a una persona sobre un hecho concreto
+- **Hecho** — afirmación sobre un evento, record o comparación verificable
+
+**3. Búsqueda de verificaciones previas**
+Para cada claim, Criba consulta dos fuentes:
+- **Ecuador Chequea** — búsqueda directa en ecuadorchequea.com vía Google Custom Search
+- **Google Fact Check Tools API** — base de datos global de verificaciones con esquema ClaimReview
+
+El contexto de fondo se genera con búsqueda web en tiempo real para ofrecer fuentes y enlaces actualizados.
+
+**Limitaciones importantes**
+Criba es una herramienta de asistencia, no de verificación. La transcripción puede contener errores con nombres propios, tecnicismos o audio de baja calidad. La extracción puede omitir algunos claims o incluir falsos positivos. El contexto debe tratarse como punto de partida, no como conclusión. **La decisión editorial siempre corresponde al periodista o fact-checker.**
+""")
+
+st.markdown("---")
 
 # ── Clientes ──────────────────────────────────────────────────────────────────
 @st.cache_resource
