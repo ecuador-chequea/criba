@@ -8,6 +8,7 @@ from pathlib import Path
 import csv
 import io
 from datetime import datetime
+import re
 
 # ── Configuración de página ──────────────────────────────────────────────────
 st.set_page_config(
@@ -94,46 +95,209 @@ def get_anthropic_client():
     return anthropic.Anthropic(api_key=st.secrets["ANTHROPIC_API_KEY"])
 
 @st.cache_resource
+def get_openai_client():
+    from openai import OpenAI
+    return OpenAI(api_key=st.secrets["OPENAI_API_KEY"])
+
+@st.cache_resource
 def get_google_api_key():
     return st.secrets["GOOGLE_API_KEY"]
 
-# ── Funciones principales ─────────────────────────────────────────────────────
+# ── Funciones YouTube ─────────────────────────────────────────────────────────
 
-def transcribe_audio(audio_bytes: bytes, filename: str) -> str:
-    """Transcribe audio usando Whisper vía API de Anthropic."""
-    client = get_anthropic_client()
+def extract_video_id(url: str) -> str | None:
+    """Extrae el video ID de una URL de YouTube."""
+    patterns = [
+        r'(?:v=|\/)([0-9A-Za-z_-]{11}).*',
+        r'(?:youtu\.be\/)([0-9A-Za-z_-]{11})',
+        r'(?:embed\/)([0-9A-Za-z_-]{11})'
+    ]
+    for pattern in patterns:
+        match = re.search(pattern, url)
+        if match:
+            return match.group(1)
+    return None
+
+
+def get_youtube_captions(video_id: str) -> str | None:
+    """Intenta obtener subtítulos del video vía YouTube Data API."""
+    api_key = get_google_api_key()
     
-    with tempfile.NamedTemporaryFile(delete=False, suffix=Path(filename).suffix) as tmp:
+    # Primero obtener lista de caption tracks
+    url = f"https://www.googleapis.com/youtube/v3/captions"
+    params = {
+        "part": "snippet",
+        "videoId": video_id,
+        "key": api_key
+    }
+    
+    try:
+        response = requests.get(url, params=params, timeout=10)
+        if response.status_code != 200:
+            return None
+        
+        data = response.json()
+        items = data.get("items", [])
+        
+        if not items:
+            return None
+        
+        # Buscar subtítulos en español primero, luego cualquier idioma
+        caption_id = None
+        for item in items:
+            lang = item["snippet"].get("language", "")
+            track_kind = item["snippet"].get("trackKind", "")
+            if lang.startswith("es"):
+                caption_id = item["id"]
+                break
+        
+        if not caption_id and items:
+            caption_id = items[0]["id"]
+        
+        if not caption_id:
+            return None
+        
+        # Descargar el caption track
+        download_url = f"https://www.googleapis.com/youtube/v3/captions/{caption_id}"
+        params_dl = {
+            "tfmt": "srt",
+            "key": api_key
+        }
+        dl_response = requests.get(download_url, params=params_dl, timeout=15)
+        
+        if dl_response.status_code == 200:
+            # Limpiar formato SRT
+            text = dl_response.text
+            text = re.sub(r'\d+\n\d{2}:\d{2}:\d{2},\d{3} --> \d{2}:\d{2}:\d{2},\d{3}\n', '', text)
+            text = re.sub(r'<[^>]+>', '', text)
+            text = '\n'.join(line for line in text.split('\n') if line.strip())
+            return text if len(text) > 50 else None
+            
+    except Exception:
+        pass
+    
+    return None
+
+
+def get_youtube_transcript_via_timedtext(video_id: str) -> str | None:
+    """Fallback: intenta obtener subtítulos automáticos de YouTube sin API key."""
+    try:
+        url = f"https://www.youtube.com/watch?v={video_id}"
+        headers = {"User-Agent": "Mozilla/5.0"}
+        response = requests.get(url, headers=headers, timeout=15)
+        
+        # Buscar URL de timedtext en el HTML
+        match = re.search(r'"captionTracks":\[{"baseUrl":"([^"]+)"', response.text)
+        if not match:
+            return None
+        
+        caption_url = match.group(1).replace('\\u0026', '&')
+        caption_response = requests.get(caption_url, timeout=10)
+        
+        if caption_response.status_code == 200:
+            # Extraer texto del XML
+            texts = re.findall(r'<text[^>]*>([^<]+)</text>', caption_response.text)
+            if texts:
+                transcript = ' '.join(texts)
+                transcript = transcript.replace('&amp;', '&').replace('&lt;', '<').replace('&gt;', '>').replace('&#39;', "'").replace('&quot;', '"')
+                return transcript
+    except Exception:
+        pass
+    
+    return None
+
+
+def transcribe_with_whisper(audio_bytes: bytes, filename: str) -> str:
+    """Transcribe audio usando Whisper API de OpenAI."""
+    client = get_openai_client()
+    
+    suffix = Path(filename).suffix or '.mp3'
+    
+    with tempfile.NamedTemporaryFile(delete=False, suffix=suffix) as tmp:
         tmp.write(audio_bytes)
         tmp_path = tmp.name
     
     try:
         with open(tmp_path, "rb") as f:
-            response = client.beta.messages.create(
-                model="claude-sonnet-4-6",
-                max_tokens=4000,
-                messages=[{
-                    "role": "user",
-                    "content": [
-                        {
-                            "type": "document",
-                            "source": {
-                                "type": "base64",
-                                "media_type": "audio/mpeg",
-                                "data": __import__('base64').b64encode(f.read()).decode()
-                            }
-                        },
-                        {
-                            "type": "text",
-                            "text": "Transcribe este audio completo. Devuelve únicamente la transcripción, sin comentarios adicionales."
-                        }
-                    ]
-                }],
-                betas=["files-api-2025-04-14"]
+            response = client.audio.transcriptions.create(
+                model="whisper-1",
+                file=f,
+                language="es"
             )
-        return response.content[0].text
+        return response.text
     finally:
         os.unlink(tmp_path)
+
+
+def download_youtube_audio(video_id: str) -> tuple[bytes, str] | tuple[None, None]:
+    """Descarga el audio de YouTube usando yt-dlp."""
+    try:
+        import yt_dlp
+        
+        with tempfile.TemporaryDirectory() as tmpdir:
+            output_path = os.path.join(tmpdir, "audio")
+            
+            ydl_opts = {
+                'format': 'bestaudio/best',
+                'outtmpl': output_path,
+                'postprocessors': [{
+                    'key': 'FFmpegExtractAudio',
+                    'preferredcodec': 'mp3',
+                    'preferredquality': '64',
+                }],
+                'quiet': True,
+                'no_warnings': True,
+            }
+            
+            with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+                ydl.download([f"https://www.youtube.com/watch?v={video_id}"])
+            
+            mp3_path = output_path + ".mp3"
+            if os.path.exists(mp3_path):
+                with open(mp3_path, "rb") as f:
+                    return f.read(), "audio.mp3"
+                    
+    except Exception as e:
+        st.warning(f"No se pudo descargar el audio: {str(e)}")
+    
+    return None, None
+
+
+def process_youtube_url(url: str) -> str:
+    """Procesa una URL de YouTube: intenta subtítulos, luego Whisper."""
+    video_id = extract_video_id(url)
+    if not video_id:
+        raise ValueError("URL de YouTube no válida. Verifica que sea un enlace correcto.")
+    
+    # Intento 1: subtítulos automáticos de YouTube (sin API)
+    st.info("🔍 Buscando subtítulos del video…")
+    transcript = get_youtube_transcript_via_timedtext(video_id)
+    if transcript:
+        st.success("✅ Subtítulos encontrados — procesando sin costo adicional.")
+        return transcript
+    
+    # Intento 2: subtítulos vía YouTube Data API
+    transcript = get_youtube_captions(video_id)
+    if transcript:
+        st.success("✅ Subtítulos obtenidos vía YouTube API.")
+        return transcript
+    
+    # Intento 3: descargar audio y transcribir con Whisper
+    st.info("🎙️ Sin subtítulos disponibles — descargando audio para transcribir con Whisper…")
+    audio_bytes, filename = download_youtube_audio(video_id)
+    
+    if audio_bytes:
+        st.info("⏳ Transcribiendo con Whisper (puede tomar 30-60 segundos)…")
+        return transcribe_with_whisper(audio_bytes, filename)
+    
+    raise ValueError("No se pudo procesar el video. Verifica que sea público y tenga audio.")
+
+
+# ── Funciones principales ─────────────────────────────────────────────────────
+
+def transcribe_audio(audio_bytes: bytes, filename: str) -> str:
+    """Transcribe audio subido directamente usando Whisper."""
+    return transcribe_with_whisper(audio_bytes, filename)
 
 
 def extract_claims(transcription: str, language: str = "es") -> list[dict]:
@@ -161,14 +325,15 @@ Para cada claim devuelve un JSON con este formato exacto:
   "claims": [
     {{
       "texto": "cita exacta del claim entre comillas",
-      "tipo": "cifra" | "declaracion" | "hecho",
+      "tipo": "cifra",
       "verificable": true,
-      "contexto_minuto": "aproximado si es posible, sino null"
+      "contexto_minuto": null
     }}
   ]
 }}
 
-Devuelve SOLO el JSON, sin texto adicional.
+El campo "tipo" solo puede ser uno de estos tres valores: "cifra", "declaracion", "hecho".
+Devuelve SOLO el JSON válido, sin texto adicional, sin markdown, sin backticks.
 
 TRANSCRIPCIÓN:
 {transcription}"""
@@ -300,17 +465,17 @@ if st.session_state.step == 1:
         if not uploaded and not url_input.strip():
             st.warning("Sube un archivo o pega una URL para continuar.")
         else:
-            with st.spinner("Transcribiendo audio…"):
+            with st.spinner("Procesando…"):
                 try:
                     if uploaded:
+                        st.info("🎙️ Transcribiendo audio con Whisper…")
                         transcription = transcribe_audio(uploaded.read(), uploaded.name)
                     else:
-                        st.info("Procesando URL de YouTube… esto puede tomar hasta 30 segundos.")
-                        transcription = f"[Transcripción simulada para demo desde URL: {url_input}]"
+                        transcription = process_youtube_url(url_input.strip())
                     
                     st.session_state.transcription = transcription
                 except Exception as e:
-                    st.error(f"Error en la transcripción: {str(e)}")
+                    st.error(f"Error: {str(e)}")
                     st.stop()
             
             with st.spinner("Identificando y clasificando claims verificables…"):
